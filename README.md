@@ -102,8 +102,8 @@ AsyncTask还提供了onCancelled方法，同样在主线程中调用，当异步
         }
 
         mStatus = Status.RUNNING;
-
-        onPreExecute();----------------------最先执行
+        //----------------------最先执行
+        onPreExecute();
 
         mWorker.mParams = params;
         exec.execute(mFuture);
@@ -123,12 +123,14 @@ AsyncTask还提供了onCancelled方法，同样在主线程中调用，当异步
                     try {
                         r.run();
                     } finally {
-                        scheduleNext(); ----------执行下一个任务
+                        //----------执行下一个任务
+                        scheduleNext(); 
                     }
                 }
             });
             if (mActive == null) {
-                scheduleNext(); ----------执行下一个任务
+                //----------执行下一个任务
+                scheduleNext(); 
             }
         }
 
