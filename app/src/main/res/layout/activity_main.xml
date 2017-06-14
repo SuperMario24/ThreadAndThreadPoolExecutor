@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    >
+
+    <Button
+    android:id="@+id/btn_start_download"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:text="Start Download" />
+
+
+    <Button
+        android:id="@+id/btn_pause_download"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Pasue Download" />
+
+    <Button
+        android:id="@+id/btn_cancel_download"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Cancel Download" />
+
+    <Button
+        android:id="@+id/btn_start_asynctask"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Start AsyncTask" />
+
+    <Button
+        android:id="@+id/btn_start_intentservice"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Start IntentService" />
+
+    <Button
+        android:id="@+id/btn_start_ThreadPoolExecutor"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Start ThreadPoolExecutor" />
+</LinearLayout>
