@@ -111,17 +111,124 @@ AsyncTask还提供了onCancelled方法，同样在主线程中调用，当异步
         return this;
     }
 
+在executeOnExecutor方法中，onPreExecute()最先执行，然后线程池开始执行。下面开始分析线程池的执行过程：
+
+    private static class SerialExecutor implements Executor {
+        final ArrayDeque<Runnable> mTasks = new ArrayDeque<Runnable>();
+        Runnable mActive;
+
+        public synchronized void execute(final Runnable r) {
+            mTasks.offer(new Runnable() {
+                public void run() {
+                    try {
+                        r.run();
+                    } finally {
+                        scheduleNext(); ----------执行下一个任务
+                    }
+                }
+            });
+            if (mActive == null) {
+                scheduleNext(); ----------执行下一个任务
+            }
+        }
+
+        protected synchronized void scheduleNext() {
+            if ((mActive = mTasks.poll()) != null) {
+                THREAD_POOL_EXECUTOR.execute(mActive);
+            }
+        }
+    }
+从SerialExecutor的实现可以分析AsyncTask的排队执行过程。首先系统会把AsyncTask的Params的参数封装为FutureTask对象，FutureTask是一个并发类，
+在这里它充当了Runnable的作用。接着FutureTask会交给SerialExecutor的execute方法去处理，execute首先会把FutureTask插入到任务队列mTasks中，
+如果这时候没有正在活动的AsyncTask任务，那么就会调用SerialExecutor的scheduleNext方法来执行下一个AsyncTask任务，同时当一个执行完后，会继续执行
+下一个AsyncTask任务，直到所有任务都被执行为止，从这一点可以看出，AsyncTask是串行执行的。
+
+AsyncTask中有两个线程池--------SerialExecutor和THREAD_POOL_EXECUTOR  和一个Handler。
+
+SerialExecutor---------用于任务的排队。
+THREAD_POOL_EXECUTOR--------真正执行任务的线程池。
+InternalHandler-------------将执行环境从线程池切换到主线程。
 
 
+在AsyncTask的构造方法中有如下这么一段代码：
+
+      mWorker = new WorkerRunnable<Params, Result>() {
+            public Result call() throws Exception {
+                mTaskInvoked.set(true);
+
+                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+                //noinspection unchecked
+                Result result = doInBackground(mParams);
+                Binder.flushPendingCommands();
+                return postResult(result);
+            }
+        };
+由于FutureTask的run方法会调用mWorker的call方法，因此mWorker的call方法最终会在线程池中执行，在mWorker的call方法中，首先将 mTaskInvoked
+设为true，表示当前任务已经被调用过了，然后执行AsyncTask的doInBackground方法，将其返回值传递给postResult方法，它的实现如下：
+
+    private Result postResult(Result result) {
+        @SuppressWarnings("unchecked")
+        Message message = getHandler().obtainMessage(MESSAGE_POST_RESULT,
+                new AsyncTaskResult<Result>(this, result));
+        message.sendToTarget();
+        return result;
+    }
+    
+ postResule方法会通过sHandler（InternalHandler）发送一个MESSAGE_POST_RESULT的消息，这个sHandler的定义如下：
+
+      private static class InternalHandler extends Handler {
+              public InternalHandler() {
+                  super(Looper.getMainLooper());
+              }
+
+              @SuppressWarnings({"unchecked", "RawUseOfParameterizedType"})
+              @Override
+              public void handleMessage(Message msg) {
+                  AsyncTaskResult<?> result = (AsyncTaskResult<?>) msg.obj;
+                  switch (msg.what) {
+                      case MESSAGE_POST_RESULT:
+                          // There is only one result
+                          result.mTask.finish(result.mData[0]);
+                          break;
+                      case MESSAGE_POST_PROGRESS:
+                          result.mTask.onProgressUpdate(result.mData);
+                          break;
+                  }
+              }
+          }
+
+为了能够将执行环境切换到主线程，这就要求sHandler必须在主线程中创建，所有要求AsyncTask的类必须在主线程中加载，sHandler收到消息后会调用AsyncTask
+的finish方法：
+
+      private void finish(Result result) {
+           if (isCancelled()) {
+               onCancelled(result);
+           } else {
+               onPostExecute(result);
+           }
+           mStatus = Status.FINISHED;
+       }
+到这里完成了AsyncTask的回调，切换到主线程执行。
 
 
+2.HandlerThread
 
+HandlerThread是一个可以使用Handler的Thread，它的实现很简单，就是在run方法中通过Looper.prepare来创建消息队列，并通过Looper.loop()来开启消息循环.
 
-
-
-
-
-
+          public void run() {
+              mTid = Process.myTid();
+              Looper.prepare();
+              synchronized (this) {
+                  mLooper = Looper.myLooper();
+                  notifyAll();
+              }
+              Process.setThreadPriority(mPriority);
+              onLooperPrepared();
+              Looper.loop();
+              mTid = -1;
+          }
+他和普通的Thread明显不同，普通的Thread主要用于在run方法中执行一个耗时任务，而HandlerThread在内部创建了消息队列，外界需要通过Handler的消息方式
+来通知HandlerThread执行一个具体的任务。HandlerThread一个具体的使用场景是IntentService。HandlerThread的run方法是一个无限循环，所以当不需要再使用HandlerThread时，可以通过它的quit或者quitSafrly方法来终止线程执行。
 
 
 
