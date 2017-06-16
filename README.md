@@ -234,6 +234,336 @@ HandlerThread是一个可以使用Handler的Thread，它的实现很简单，就
 
 
 
+2.HandlerThread
+
+HandlerThread继承了Thread，他是一种可以使用Handler的Thread，它的实现原理也很简单，就是在run方法中通过Looper.prepare来创建消息队列，并通过
+Looper.loop()来开启消息循环。
+
+       @Override
+          public void run() {
+              mTid = Process.myTid();
+              //创建消息队列
+              Looper.prepare();
+              synchronized (this) {
+                  mLooper = Looper.myLooper();
+                  notifyAll();
+              }
+              Process.setThreadPriority(mPriority);
+              onLooperPrepared();
+              //开启消息循环
+              Looper.loop();
+              mTid = -1;
+          }
+
+HandlerThread的具体使用场景是IntentService，HandlerThread的run方法是一个无线循环，因此当明确不在使用ThreadThread时，应调用它的quit或者
+quitSafely来终止线程的执行。
+
+
+
+
+3.IntnetService
+
+
+IntentService继承了Service并且是一个抽象类，必须创建它的子类才能使用IntentService，IntentService封装了HandlerThread和Handler，这一点可以
+通过它的onCreate方法可以看出来：
+
+    @Override
+       public void onCreate() {
+           // TODO: It would be nice to have an option to hold a partial wakelock
+           // during processing, and to have a static startService(Context, Intent)
+           // method that would launch the service & hand off a wakelock.
+
+           super.onCreate();
+           //创建HandlerThread
+           HandlerThread thread = new HandlerThread("IntentService[" + mName + "]");
+           thread.start();
+           //获取HandlerThread的Looper
+           mServiceLooper = thread.getLooper();
+           //通过Looper创建HandlerThread的Handler
+           mServiceHandler = new ServiceHandler(mServiceLooper);
+       }
+
+当IntentService第一次启动时，它的onCreate方法会被调用，onCreate方法会创建一个HandlerThread，并且获取它的Looper，再通过它的Looper构造一个
+Handler对象mServiceHandler这样通过mServiceHandler发送的消息都会在HandlerThread中执行。每次启动IntentService，它的onStartCommand方法
+都会被调用一次，IntentService在onStartCommand中处理每个后台任务。onStartCommand调用了onStart：
+
+          @Override
+          public void onStart(Intent intent, int startId) {
+              Message msg = mServiceHandler.obtainMessage();
+              msg.arg1 = startId;
+              msg.obj = intent;
+              mServiceHandler.sendMessage(msg);
+          }
+
+可以看出IntentService仅仅是通过mServiceHandler发送了一个消息，这个消息会在HandlerThread中被处理。mServiceHandler收到消息后，会将Intent
+传递给onHandleIntent处理。这个Intent和startService（intent）中的intent的内容是完全一致的，通过这个Intent就可以解析出外界启动IntentService
+时所传的参数，通过这些参数来区分具体的后台任务。
+onHandleIntent方法执行结束后，IntentService会通过stopSelf（int startId）方法来尝试停止服务，这里不使用stopSelf时因为stopSelf会立刻停止服务，stopSelf（int startId）则会等待所有的消息都处理完毕后才会终止服务。一般来说，stopSelf（int startId）在停止服务之前会判断最近启动的服务次数是否和startId相等，如果相等，则立刻停止服务，不相等则不停止。
+
+ServiceHandler的实现如下：也就是HandlerThread的Handler。
+
+       private final class ServiceHandler extends Handler {
+              public ServiceHandler(Looper looper) {
+                  super(looper);
+              }
+
+              @Override
+              public void handleMessage(Message msg) {
+                  onHandleIntent((Intent)msg.obj);
+                  stopSelf(msg.arg1);
+              }
+          }
+          
+另外，每执行一个后台任务就必须启动一次IntentService，而IntentService内部会通过消息的方式向HandlerThread请求执行任务，Handler中的Looper是顺序处理消息的，这就意味着IntentService也是顺序执行后台任务的。
+
+下面举个例子说明IntentService的工作方式：
+
+         public class LocalIntentService extends IntentService{
+
+             private static final String TAG = "LocalIntentService";
+
+             public LocalIntentService() {
+                 super(TAG);
+             }
+
+             @Override
+             protected void onHandleIntent(Intent intent) {
+                 String action = intent.getStringExtra("task_action");
+                 Log.d(TAG, "receive task: "+action);
+                 SystemClock.sleep(3000);
+                 if("TASK1".equals(action)){
+                     Log.d(TAG, "handle task:"+action);
+                 }
+             }
+
+             @Override
+             public void onDestroy() {
+                 Log.d(TAG, "service onDestroy");
+                 super.onDestroy();
+             }
+         }
+         
+启动代码：
+
+                Intent service = new Intent(MainActivity.this,LocalIntentService.class);
+                service.putExtra("task_action","TASK1");
+                startService(service);
+                service.putExtra("task_action","TASK2");
+                startService(service);
+                service.putExtra("task_action","TASK3");
+                startService(service);
+          
+三个后台任务是排队执行的，他们的执行顺序就是它们发起请求的顺序。
+
+
+
+三.Android中的线程池
+
+1.线程池的优点：
+（1）重用线程池中的线程，减少性能开销
+（2）能有效控制线程池的最大并发数，避免大量线程池之间相互抢占系统资源而导致阻塞的现象
+（3）能够对线程池进行简单的管理
+
+2.线程池的概念源于Java中的Executor，Executor是一个接口，真正的线程池的实现为ThreadPoolExecutor。
+
+
+3.ThreadPoolExecutor
+
+线程池的真正实现，它的构造方法提供了一系列的参数来配置线程池：
+
+      public ThreadPoolExecutor(int corePoolSize,-----------------------核心线程数
+                                 int maximumPoolSize,---------------------线程池所能容纳的最大线程数
+                                 long keepAliveTime,------------------------超时时长
+                                 TimeUnit unit,-------------------------超时时长的单位
+                                 BlockingQueue<Runnable> workQueue,-----------线程池中的任务队列
+                                 ThreadFactory threadFactory) {----------------为线程池提供创建新线程的功能
+           this(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue,
+                threadFactory, defaultHandler);
+       }
+
+
+如果将ThreadPoolExecutor的allowCoreThreadTimeOut设为true的话，那么闲置的核心线程超过keepAliveTime后也会被终止回收，默认是设为false的。
+ThreadFactory是一个接口，他只有一个方法：Thread new Thread（Runnable r）.
+
+
+除了上面的这些主要参数外，ThreadPoolExecutor还有一个不常用的参数RejectedExecutionHandler Handler，当线程池无法执行任务时，这可能是任务队列
+满了了或者是无法成功执行任务，这时ThreadPoolExecutor会调用handler的rejectedExecution方法来通知调用者，默认情况下rejectedExecution方法会直接
+抛出一个RejectedExecutionException异常。
+
+
+
+ThreadPoolExecutor执行时大致遵循如下规则：
+（1）线程池中的线程数未达到核心线程的数量，那么会直接启动一个核心线程来执行任务
+（2）如果线程池中的线程数量已经达到或者超过核心线程的数量，那么任务会被插入任务队列等待执行
+（3）如果（2）中无法将任务插入任务队列，这往往是由于任务队列已满，这个时候如果线程数量未达到线程池规定的最大值，那么会启动一个非核心线程来执行任务
+（4）如果（3）中线程数量已经达到线程池的最大线程数，那么会拒绝执行任务，ThreadPoolExecutor会调用handler的rejectedExecution方法来抛出异常。
+
+
+ThreadPoolExecutor的参数在AsyncTask中有明显的体现：
+
+       private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
+          private static final int CORE_POOL_SIZE = CPU_COUNT + 1;
+          private static final int MAXIMUM_POOL_SIZE = CPU_COUNT * 2 + 1;
+          private static final int KEEP_ALIVE = 1;
+
+          private static final ThreadFactory sThreadFactory = new ThreadFactory() {
+              private final AtomicInteger mCount = new AtomicInteger(1);
+
+              public Thread newThread(Runnable r) {
+                  return new Thread(r, "AsyncTask #" + mCount.getAndIncrement());
+              }
+          };
+
+          private static final BlockingQueue<Runnable> sPoolWorkQueue =
+                  new LinkedBlockingQueue<Runnable>(128);
+
+          /**
+           * An {@link Executor} that can be used to execute tasks in parallel.
+           */
+          public static final Executor THREAD_POOL_EXECUTOR
+                  = new ThreadPoolExecutor(CORE_POOL_SIZE, MAXIMUM_POOL_SIZE, KEEP_ALIVE,
+                          TimeUnit.SECONDS, sPoolWorkQueue, sThreadFactory);
+          
+1.核心线程数等于CPU核心数+1
+2.线程池的最大线程数为CPU核心数的2倍+1
+3.核心线程无超时机制，非核心线程超时时间为1秒
+4.队列容量为128
+
+
+
+
+
+
+4.线程池的分类：
+
+
+（1）FixedThreadPool
+
+          public static ExecutorService newFixedThreadPool(int nThreads) {
+              return new ThreadPoolExecutor(nThreads, nThreads,
+                                            0L, TimeUnit.MILLISECONDS,
+                                            new LinkedBlockingQueue<Runnable>());
+          }
+
+1.线程数量固定
+2.线程都是核心线程
+3.当线程处于空闲状态时，不会被回收。除非线程池关闭了
+4.任务队列没有大小限制
+5.这意味它能够更加快速的响应外界的请求
+
+
+
+
+（2）CachedThreadPool
+
+                public static ExecutorService newCachedThreadPool() {
+                    return new ThreadPoolExecutor(0, Integer.MAX_VALUE,
+                                                  60L, TimeUnit.SECONDS,
+                                                  new SynchronousQueue<Runnable>());
+                }
+          
+1.线程数量不固定
+2.没有核心线程
+3.超时时长为60秒
+4.适合执行大量的耗时较少的任务，当整个任务处于闲置状态时，线程池中的线程都会因为超时被终止，这个时候CachedThreadPool实际上是没有任何线程的，它几乎
+不占用任何系统资源
+
+
+
+
+（3）ScheduledThreadPool
+         
+      public ScheduledThreadPoolExecutor(int corePoolSize) {
+           super(corePoolSize, Integer.MAX_VALUE,
+                 DEFAULT_KEEPALIVE_MILLIS, MILLISECONDS,
+                 new DelayedWorkQueue());
+       }
+       
+1.核心线程是固定的，非核心线程是没有限制的
+2.非核心线程闲置时会被立刻回收
+3.主要用于执行定时任务和具有固定周期的重复任务
+
+
+
+（4）SingleThreadExecutor
+         
+           public static ExecutorService newSingleThreadExecutor() {
+              return new FinalizableDelegatedExecutorService
+                  (new ThreadPoolExecutor(1, 1,
+                                          0L, TimeUnit.MILLISECONDS,
+                                          new LinkedBlockingQueue<Runnable>()));
+          } 
+  
+  
+1.只有核心线程
+2.确保所有的任务都在同一个线程池中按顺序执行
+3.意义在于统一所有的外界任务到一个线程池中，这使得不需要处理线程同步问题
+
+
+使用方法：
+
+
+               Runnable runnable = new Runnable() {
+                    @Override
+                    public void run() {
+                        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+                        Log.d(TAG, "正在执行耗时任务："+sdf.format(new Date()));
+                        SystemClock.sleep(5000);
+                        Log.d(TAG, "任务结束："+sdf.format(new Date()));
+
+
+                    }
+                };
+
+                ExecutorService fixedThreadPool = Executors.newFixedThreadPool(4);
+                fixedThreadPool.execute(runnable);
+
+                ExecutorService cachedThreadPool = Executors.newCachedThreadPool();
+                cachedThreadPool.execute(runnable);
+
+                ScheduledExecutorService scheduledThreadPool = Executors.newScheduledThreadPool(4);
+                //2000ms后执行runnable
+                scheduledThreadPool.schedule(runnable,2000, TimeUnit.MILLISECONDS);
+                //延迟10ms后，每隔1000ms执行一次runnable
+                scheduledThreadPool.scheduleAtFixedRate(runnable,10,1000,TimeUnit.MILLISECONDS);
+
+
+
+                ExecutorService singleThreadExecutor = Executors.newSingleThreadExecutor();
+                singleThreadExecutor.execute(runnable);
+          
+          
+          
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
